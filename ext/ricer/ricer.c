@@ -164,9 +164,7 @@ static int on_http_message_complete(http_parser* parser)
     rb_hash_aset(client->env, sREQUEST_METHOD, rb_obj_freeze(rb_str_new_cstr(http_method_str(parser->method))));
     
     // call into app
-    VAL res = rb_funcall(app, i_call, 1, client->env);
-    
-    
+    rb_funcall(app, i_call, 1, client->env);
     
     // done
     return 0;
