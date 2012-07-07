@@ -242,7 +242,7 @@ static int on_http_message_complete(http_parser* parser)
     rb_hash_aset(client->env, sREQUEST_URI, rb_obj_freeze(rb_str_new(client->url, client->url_len)));
     char* query_string = memchr(client->url, '?', client->url_len);
     if(query_string) {
-        VALUE path = rb_obj_freeze(rb_str_new(client->url, (size_t)(query_string - client->url_len)));
+        VALUE path = rb_obj_freeze(rb_str_new(client->url, (size_t)(query_string - client->url)));
         rb_hash_aset(client->env, sPATH_INFO, path);
         rb_hash_aset(client->env, sREQUEST_PATH, path);
         rb_hash_aset(client->env, sQUERY_STRING, rb_obj_freeze(rb_str_new(query_string + 1, client->url_len - (size_t)(query_string - client->url) - 1)));
