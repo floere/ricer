@@ -1,0 +1,29 @@
+#!/usr/bin/env ruby
+require "optparse"
+require "ricer"
+
+options = { address: "0.0.0.0", port: 3000, rackup: "#{Dir.pwd}/config.ru" }
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: ricer [options]"
+  
+  opts.on "-a", "--address", "Address to listen on" do |a|
+    options[:address] = a
+  end
+  
+  opts.on "-p", "--port", "Port to listen on" do |a|
+    options[:port] = p.to_i
+  end
+  
+  opts.on "--rackup", "Use specific file as rackup file" do |ru|
+    options[:rackup] = ru
+  end
+end.parse!
+
+Object.send :define_method, :run do |app|
+  puts "Ricer #{Ricer::VERSION}"
+  puts "Listening on #{options[:address]}:#{options[:port]}"
+  Ricer.run options[:address], options[:port], app
+end
+
+load options[:rackup]

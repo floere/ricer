@@ -421,6 +421,11 @@ static VALUE Ricer_run(VALUE self, VALUE v_address, VALUE v_port, VALUE app)
     return Qnil;
 }
 
+static void on_sigint(int signal)
+{
+    rb_interrupt();
+}
+
 void Init_ricer()
 {    
     rb_gc_register_address(&app);
@@ -435,6 +440,7 @@ void Init_ricer()
     
     Ricer = rb_define_module("Ricer");
     rb_ary_push(globals, Ricer);
+    rb_const_set(Ricer, rb_intern("VERSION"), rb_str_new_cstr("0.1.0"));
     rb_define_singleton_method(Ricer, "run", Ricer_run, 3);
     
     #define GLOBAL_STR(var, str) var = rb_obj_freeze(rb_str_new_cstr(str)); rb_ary_push(globals, var);
@@ -468,6 +474,8 @@ void Init_ricer()
     rb_require("stringio");
     StringIO = rb_const_get(rb_cObject, rb_intern("StringIO"));
     rb_ary_push(globals, StringIO);
+    
+    signal(SIGINT, on_sigint);
     
     #undef GLOBAL_STR
 }
