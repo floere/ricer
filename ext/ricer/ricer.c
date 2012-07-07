@@ -11,6 +11,7 @@
 #include "http_parser.h"
 
 #define SERVER_SOFTWARE "Ricer"
+#define MAX_HEADER_SIZE 4096
 
 typedef enum last_callback {
     CB_URL,
@@ -25,6 +26,7 @@ typedef struct client {
     http_parser_settings parser_settings;
     http_parser parser;
     last_callback_t last_callback;
+    size_t total_header_size;
     char* url;
     size_t url_len;
     char* header_field;
@@ -112,6 +114,10 @@ static void on_shutdown(uv_shutdown_t* req, int status)
 static int on_http_url(http_parser* parser, const char* buff, size_t length)
 {
     client_t* client = (client_t*)parser->data;
+    if((client->total_header_size += length) > MAX_HEADER_SIZE) {
+        // headers too long
+        return 1;
+    }
     client->url = realloc(client->url, client->url_len + length);
     memcpy(client->url + client->url_len, buff, length);
     client->url_len += length;
@@ -149,6 +155,10 @@ static int on_http_header_field(http_parser* parser, const char* buff, size_t le
         // we need to save the last header/value pair
         save_last_header_value(client);
     }
+    if((client->total_header_size += length) > MAX_HEADER_SIZE) {
+        // headers too long
+        return 1;
+    }
     
     client->header_field = realloc(client->header_field, client->header_field_len + length);
     memcpy(client->header_field + client->header_field_len, buff, length);
@@ -162,6 +172,10 @@ static int on_http_header_field(http_parser* parser, const char* buff, size_t le
 static int on_http_body(http_parser* parser, const char* buff, size_t length)
 {
     client_t* client = (client_t*)parser->data;
+    if((client->total_header_size += length) > MAX_HEADER_SIZE) {
+        // headers too long
+        return 1;
+    }
     rb_str_cat(client->body, buff, length);
     client->last_callback = CB_BODY;
     return 0;
@@ -170,6 +184,10 @@ static int on_http_body(http_parser* parser, const char* buff, size_t length)
 static int on_http_header_value(http_parser* parser, const char* buff, size_t length)
 {
     client_t* client = (client_t*)parser->data;
+    if((client->total_header_size += length) > MAX_HEADER_SIZE) {
+        // headers too long
+        return 1;
+    }
     
     client->header_value = realloc(client->header_value, client->header_value_len + length);
     memcpy(client->header_value + client->header_value_len, buff, length);
@@ -230,6 +248,8 @@ static VALUE collect_body(VALUE i, VALUE str, int argc, VALUE* argv)
 static void on_write(uv_write_t* req, int status)
 {
     client_t* client = req->handle->data;
+    free(((uv_buf_t*)req->data)->base);
+    free(req->data);
     free(req);
 }
 
@@ -293,9 +313,13 @@ static int on_http_message_complete(http_parser* parser)
         rb_funcall(v_body, i_close, 0);
     }
     
-    uv_buf_t b = { .base = RSTRING_PTR(v_response_str), .len = RSTRING_LEN(v_response_str) };
+    uv_buf_t* b = malloc(sizeof(uv_buf_t));
+    b->len = RSTRING_LEN(v_response_str);
+    b->base = malloc(b->len);
+    memcpy(b->base, RSTRING_PTR(v_response_str), b->len);
     uv_write_t* req = malloc(sizeof(uv_write_t));
-    uv_write(req, &client->socket, &b, 1, on_write);
+    req->data = b;
+    uv_write(req, &client->socket, b, 1, on_write);
     
     client->last_callback = CB_COMPLETE;
     
@@ -327,26 +351,37 @@ static int on_http_message_begin(http_parser* parser)
     return 0;
 }
 
+static void http_bad_request(client_t* client)
+{
+    uv_buf_t* b = malloc(sizeof(uv_buf_t));
+    const char* response = "HTTP/1.1 400 Bad Request\r\nServer: " SERVER_SOFTWARE "\r\n\r\n<h1>Bad Request</h1>";
+    b->len = strlen(response);
+    b->base = malloc(b->len);
+    memcpy(b->base, response, b->len);
+    uv_write_t* req = malloc(sizeof(uv_write_t));
+    req->data = b;
+    uv_write(req, &client->socket, b, 1, on_write);
+    client->shutdown = true;
+    uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+    uv_shutdown(shutdown, &client->socket, on_shutdown);
+}
+
 static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
 {
     client_t* client = (client_t*)stream->data;
     if(nread < 0) {
+        /*
         client->shutdown = 1;
         uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
         uv_shutdown(shutdown, &client->socket, on_shutdown);
+        */
     } else if(nread == 0) {
         if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
-            // check for further error:
-            client->shutdown = 1;
-            uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
-            uv_shutdown(shutdown, &client->socket, on_shutdown);
+            http_bad_request(client);
         }
     } else {
         if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
-            // check for further error:
-            client->shutdown = 1;
-            uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
-            uv_shutdown(shutdown, &client->socket, on_shutdown);
+            http_bad_request(client);
         } else {
             if(client->last_callback == CB_COMPLETE) {
                 client->shutdown = 1;
