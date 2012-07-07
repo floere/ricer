@@ -42,6 +42,7 @@ static ID i_new;
 static ID i_call;
 static ID i_to_i;
 static ID i_each;
+static ID i_close;
 static uint16_t port;
 static VALUE app = Qnil;
 static uv_loop_t* loop;
@@ -281,6 +282,9 @@ static int on_http_message_complete(http_parser* parser)
     rb_block_call(v_headers, i_each, 0, NULL, collect_headers, v_response_str);
     rb_str_concat(v_response_str, s_crlf);
     rb_block_call(v_body, i_each, 0, NULL, collect_body, v_response_str);
+    if(rb_respond_to(v_body, i_close)) {
+        rb_funcall(v_body, i_close, 0);
+    }
     
     uv_buf_t b = { .base = RSTRING_PTR(v_response_str), .len = RSTRING_LEN(v_response_str) };
     uv_write_t* req = malloc(sizeof(uv_write_t));
@@ -437,6 +441,7 @@ void Init_ricer()
     i_call = rb_intern("call");
     i_to_i = rb_intern("to_i");
     i_each = rb_intern("each");
+    i_close = rb_intern("close");
     
     Ricer = rb_define_module("Ricer");
     rb_ary_push(globals, Ricer);
