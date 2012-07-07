@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 require "optparse"
-require "ricer"
+require_relative '../ext/ricer/ricer'
 
 options = { address: "0.0.0.0", port: 3000, rackup: "#{Dir.pwd}/config.ru" }
 
