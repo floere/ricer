@@ -374,6 +374,7 @@ static void http_bad_request(client_t* client)
     req->data = b;
     uv_write(req, &client->socket, b, 1, on_write);
     client->shutdown = true;
+    uv_read_stop(&client->socket);
     uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
     uv_shutdown(shutdown, &client->socket, on_shutdown);
 }
@@ -382,11 +383,10 @@ static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
 {
     client_t* client = (client_t*)stream->data;
     if(nread < 0) {
-        /*
         client->shutdown = 1;
+        uv_read_stop(stream);
         uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
-        uv_shutdown(shutdown, &client->socket, on_shutdown);
-        */
+        uv_shutdown(shutdown, stream, on_shutdown);
     } else if(nread == 0) {
         if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
             http_bad_request(client);
@@ -397,10 +397,9 @@ static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
         } else {
             if(client->last_callback == CB_COMPLETE && !http_should_keep_alive(&client->parser)) {
                 client->shutdown = 1;
+                uv_read_stop(stream);
                 uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
-                uv_shutdown(shutdown, &client->socket, on_shutdown);
-            } else {
-                uv_read_start((uv_stream_t*)&client->socket, uv_ricer_alloc, on_read);
+                uv_shutdown(shutdown, stream, on_shutdown);
             }
         }
     }
