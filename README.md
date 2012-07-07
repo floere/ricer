@@ -6,7 +6,7 @@ A Rack-compliant ruby web server. It's written in C cuz its fast.
 
 > *ricer is almost as fast as this car*
 
-### Benchmark
+## Benchmark
 
 The following Rack app was used benchmark WEBrick, Unicorn, Thin and Ricer:
 
