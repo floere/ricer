@@ -15,7 +15,9 @@
 typedef enum last_callback {
     CB_URL,
     CB_HEADER_FIELD,
-    CB_HEADER_VALUE
+    CB_HEADER_VALUE,
+    CB_BODY,
+    CB_COMPLETE
 } last_callback_t;
 
 typedef struct client {
@@ -96,12 +98,14 @@ static void on_close(uv_handle_t* stream)
     if(client->header_value) {
         free(client->header_value);
     }
+    rb_gc_unregister_address(&client->body);
     rb_gc_unregister_address(&client->env);
     free(client);
 }
 
 static void on_shutdown(uv_shutdown_t* req, int status)
 {
+    free(req);
     uv_close((uv_handle_t*)req->handle, on_close);
 }
 
@@ -126,6 +130,7 @@ static void save_last_header_value(client_t* client)
             cgi_header_name[i + 5] = toupper(client->header_field[i]);
         }
     }
+    cgi_header_name[client->header_field_len + 5] = 0;
     VALUE header_name = rb_obj_freeze(rb_str_new(cgi_header_name, 5 + client->header_field_len));
     VALUE header_value = rb_obj_freeze(rb_str_new(client->header_value, client->header_value_len));
     rb_hash_aset(client->env, header_name, header_value);
@@ -158,6 +163,7 @@ static int on_http_body(http_parser* parser, const char* buff, size_t length)
 {
     client_t* client = (client_t*)parser->data;
     rb_str_cat(client->body, buff, length);
+    client->last_callback = CB_BODY;
     return 0;
 }
 
@@ -223,6 +229,7 @@ static VALUE collect_body(VALUE i, VALUE str, int argc, VALUE* argv)
 
 static void on_write(uv_write_t* req, int status)
 {
+    client_t* client = req->handle->data;
     free(req);
 }
 
@@ -288,9 +295,9 @@ static int on_http_message_complete(http_parser* parser)
     
     uv_buf_t b = { .base = RSTRING_PTR(v_response_str), .len = RSTRING_LEN(v_response_str) };
     uv_write_t* req = malloc(sizeof(uv_write_t));
-    uv_write(req, &client->socket, &b, 1, NULL);
+    uv_write(req, &client->socket, &b, 1, on_write);
     
-    client->shutdown = 1;
+    client->last_callback = CB_COMPLETE;
     
     // done
     return 0;
@@ -341,10 +348,11 @@ static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
             uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
             uv_shutdown(shutdown, &client->socket, on_shutdown);
         } else {
-            if(client->shutdown) {
+            if(client->last_callback == CB_COMPLETE) {
+                client->shutdown = 1;
                 uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
                 uv_shutdown(shutdown, &client->socket, on_shutdown);
-            } else {    
+            } else {
                 uv_read_start((uv_stream_t*)&client->socket, uv_ricer_alloc, on_read);
             }
         }
@@ -354,7 +362,8 @@ static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
 
 static void on_connection(uv_stream_t* server, int status)
 {
-    client_t* client = calloc(1, sizeof(client_t));
+    client_t* client = malloc(sizeof(client_t));
+    memset(client, 0, sizeof(client_t));
     uv_tcp_init(loop, (uv_tcp_t*)&client->socket);
     uv_accept(server, &client->socket);
     
@@ -371,6 +380,8 @@ static void on_connection(uv_stream_t* server, int status)
     
     client->env = Qnil;
     rb_gc_register_address(&client->env);
+    client->body = Qnil;
+    rb_gc_register_address(&client->body);
     
     uv_read_start((uv_stream_t*)&client->socket, uv_ricer_alloc, on_read);
 }
