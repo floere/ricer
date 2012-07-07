@@ -260,6 +260,22 @@ static void on_write(uv_write_t* req, int status)
     free(req);
 }
 
+static void http_bad_request(client_t* client)
+{
+    uv_buf_t* b = malloc(sizeof(uv_buf_t));
+    const char* response = "HTTP/1.1 400 Bad Request\r\nServer: " SERVER_SOFTWARE "\r\n\r\n<h1>Bad Request</h1>";
+    b->len = strlen(response);
+    b->base = malloc(b->len);
+    memcpy(b->base, response, b->len);
+    uv_write_t* req = malloc(sizeof(uv_write_t));
+    req->data = b;
+    uv_write(req, &client->socket, b, 1, on_write);
+    client->shutdown = true;
+    uv_read_stop(&client->socket);
+    uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+    uv_shutdown(shutdown, &client->socket, on_shutdown);
+}
+
 static int on_http_message_complete(http_parser* parser)
 {
     client_t* client = (client_t*)parser->data;
@@ -290,8 +306,7 @@ static int on_http_message_complete(http_parser* parser)
     // call into app
     VALUE response = rb_funcall(app, i_call, 1, client->env);
     if(TYPE(response) != T_ARRAY || RARRAY_LEN(response) < 3) {
-        // bad response, bail out
-        printf("response was not array or len < 3\n");
+        http_bad_request(client);
         return 1;
     }
     
@@ -304,7 +319,7 @@ static int on_http_message_complete(http_parser* parser)
     if(TYPE(v_status) != T_FIXNUM) {
         v_status = rb_funcall(v_status, i_to_i, 0);
         if(TYPE(v_status) != T_FIXNUM) {
-            printf("could not convert status to fixnum\n");
+            http_bad_request(client);
             return 1;
         }
     }
@@ -361,22 +376,6 @@ static int on_http_message_begin(http_parser* parser)
     rb_hash_aset(client->env, sRackUrlScheme, HTTP_URL_SCHEME /* TODO return https if applicable */);
     
     return 0;
-}
-
-static void http_bad_request(client_t* client)
-{
-    uv_buf_t* b = malloc(sizeof(uv_buf_t));
-    const char* response = "HTTP/1.1 400 Bad Request\r\nServer: " SERVER_SOFTWARE "\r\n\r\n<h1>Bad Request</h1>";
-    b->len = strlen(response);
-    b->base = malloc(b->len);
-    memcpy(b->base, response, b->len);
-    uv_write_t* req = malloc(sizeof(uv_write_t));
-    req->data = b;
-    uv_write(req, &client->socket, b, 1, on_write);
-    client->shutdown = true;
-    uv_read_stop(&client->socket);
-    uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
-    uv_shutdown(shutdown, &client->socket, on_shutdown);
 }
 
 static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
