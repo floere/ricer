@@ -15,7 +15,7 @@ OptionParser.new do |opts|
     options[:port] = p.to_i
   end
   
-  opts.on "--rackup", "Use specific file as rackup file" do |ru|
+  opts.on "--rackup FILE", "Use specific file as rackup file" do |ru|
     options[:rackup] = ru
   end
 end.parse!
