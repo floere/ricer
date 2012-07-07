@@ -5,9 +5,12 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <uv.h>
 #include <arpa/inet.h>
 #include "http_parser.h"
+
+#define SERVER_SOFTWARE "Ricer"
 
 typedef enum last_callback {
     CB_URL,
@@ -26,16 +29,24 @@ typedef struct client {
     size_t header_field_len;
     char* header_value;
     size_t header_value_len;
+    VALUE body;
+    bool shutdown;
+    bool sent_server_header;
     VALUE env;
 } client_t;
 
 static VALUE globals;
 
 static VALUE Ricer;
+static ID i_new;
 static ID i_call;
+static ID i_to_i;
+static ID i_each;
 static uint16_t port;
 static VALUE app = Qnil;
 static uv_loop_t* loop;
+
+static VALUE StringIO;
 
 static VALUE sREQUEST_METHOD;
 static VALUE sREQUEST_PATH;
@@ -49,7 +60,11 @@ static VALUE sSERVER_PORT;
 static VALUE sREQUEST_PATH;
 static VALUE sRicer;
 static VALUE s_empty;
+static VALUE s_crlf;
+static VALUE s_colon_space;
 
+static VALUE sRackInput;
+static VALUE sRackErrors;
 static VALUE sRackVersion;
 static VALUE RACK_VERSION;
 static VALUE sRackMultithread;
@@ -66,6 +81,27 @@ static uv_buf_t uv_ricer_alloc(uv_handle_t* handle, size_t suggested_size)
 static void uv_ricer_free(uv_buf_t buff)
 {
     free(buff.base);
+}
+
+static void on_close(uv_handle_t* stream)
+{
+    client_t* client = (client_t*)stream->data;
+    if(client->url) {
+        free(client->url);
+    }
+    if(client->header_field) {
+        free(client->header_field);
+    }
+    if(client->header_value) {
+        free(client->header_value);
+    }
+    rb_gc_unregister_address(&client->env);
+    free(client);
+}
+
+static void on_shutdown(uv_shutdown_t* req, int status)
+{
+    uv_close((uv_handle_t*)req->handle, on_close);
 }
 
 static int on_http_url(http_parser* parser, const char* buff, size_t length)
@@ -117,6 +153,13 @@ static int on_http_header_field(http_parser* parser, const char* buff, size_t le
     return 0;
 }
 
+static int on_http_body(http_parser* parser, const char* buff, size_t length)
+{
+    client_t* client = (client_t*)parser->data;
+    rb_str_cat(client->body, buff, length);
+    return 0;
+}
+
 static int on_http_header_value(http_parser* parser, const char* buff, size_t length)
 {
     client_t* client = (client_t*)parser->data;
@@ -138,6 +181,48 @@ static int on_http_headers_complete(http_parser* parser)
         save_last_header_value(client);
     }
     return 0;
+}
+
+static VALUE collect_headers(VALUE i, VALUE str, int argc, VALUE* argv)
+{
+    if(argc < 1 || TYPE(argv[0]) != T_ARRAY) {
+        return Qnil;
+    }
+    VALUE* nv = RARRAY_PTR(argv[0]);
+    if(RARRAY_LEN(argv[0]) < 2) {
+        return Qnil;
+    }
+    
+    char* value = rb_string_value_cstr(&nv[1]);
+    
+    while(value) {
+        rb_str_concat(str, nv[0]);
+        rb_str_concat(str, s_colon_space);
+        char* next = strchr(value, '\n');
+        if(next) {
+            rb_str_cat(str, value, (int)(next - value));
+            value = next + 1;
+        } else {
+            rb_str_cat(str, value, strlen(value));
+            value = NULL;
+        }
+        rb_str_concat(str, s_crlf);
+    }
+    return Qnil;
+}
+
+static VALUE collect_body(VALUE i, VALUE str, int argc, VALUE* argv)
+{
+    if(argc < 1) {
+        return Qnil;
+    }
+    rb_str_concat(str, argv[0]);
+    return Qnil;
+}
+
+static void on_write(uv_write_t* req, int status)
+{
+    free(req);
 }
 
 static int on_http_message_complete(http_parser* parser)
@@ -163,8 +248,45 @@ static int on_http_message_complete(http_parser* parser)
     // set request method:
     rb_hash_aset(client->env, sREQUEST_METHOD, rb_obj_freeze(rb_str_new_cstr(http_method_str(parser->method))));
     
+    // set IO streams:
+    rb_hash_aset(client->env, sRackInput, rb_funcall(StringIO, i_new, 1, client->body));
+    rb_hash_aset(client->env, sRackErrors, rb_stderr);
+    
     // call into app
-    rb_funcall(app, i_call, 1, client->env);
+    VALUE response = rb_funcall(app, i_call, 1, client->env);
+    if(TYPE(response) != T_ARRAY || RARRAY_LEN(response) < 3) {
+        // bad response, bail out
+        printf("response was not array or len < 3\n");
+        return 1;
+    }
+    
+    VALUE* response_ary = RARRAY_PTR(response);
+    VALUE v_status = response_ary[0];
+    VALUE v_headers = response_ary[1];
+    VALUE v_body = response_ary[2];
+    
+    int status = 0;
+    if(TYPE(v_status) != T_FIXNUM) {
+        v_status = rb_funcall(v_status, i_to_i, 0);
+        if(TYPE(v_status) != T_FIXNUM) {
+            printf("could not convert status to fixnum\n");
+            return 1;
+        }
+    }
+    status = FIX2INT(v_status);
+    
+    char buff[64];
+    sprintf(buff, "HTTP/1.1 %d OK\r\n", status);
+    VALUE v_response_str = rb_str_new(buff, strlen(buff));
+    rb_block_call(v_headers, i_each, 0, NULL, collect_headers, v_response_str);
+    rb_str_concat(v_response_str, s_crlf);
+    rb_block_call(v_body, i_each, 0, NULL, collect_body, v_response_str);
+    
+    uv_buf_t b = { .base = RSTRING_PTR(v_response_str), .len = RSTRING_LEN(v_response_str) };
+    uv_write_t* req = malloc(sizeof(uv_write_t));
+    uv_write(req, &client->socket, &b, 1, NULL);
+    
+    client->shutdown = 1;
     
     // done
     return 0;
@@ -181,6 +303,7 @@ static int on_http_message_begin(http_parser* parser)
     }
     
     // initialize environment for new request:
+    client->body = rb_str_new("", 0);
     client->env = rb_hash_new();
     rb_hash_aset(client->env, sSERVER_SOFTWARE, sRicer);
     rb_hash_aset(client->env, sSERVER_PORT, INT2FIX(port));
@@ -193,36 +316,34 @@ static int on_http_message_begin(http_parser* parser)
     return 0;
 }
 
-static void on_close(uv_handle_t* stream)
-{
-    client_t* client = (client_t*)stream->data;
-    if(client->url) {
-        free(client->url);
-    }
-    if(client->header_field) {
-        free(client->header_field);
-    }
-    if(client->header_value) {
-        free(client->header_value);
-    }
-    rb_gc_unregister_address(&client->env);
-    free(client);
-}
-
 static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
 {
     client_t* client = (client_t*)stream->data;
     if(nread < 0) {
-        uv_close((uv_handle_t*)&client->socket, on_close);
+        client->shutdown = 1;
+        uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+        uv_shutdown(shutdown, &client->socket, on_shutdown);
     } else if(nread == 0) {
-        // vvvvvv
-        http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread);
-        // ^^^^^^ TODO check for error
+        if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
+            // check for further error:
+            client->shutdown = 1;
+            uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+            uv_shutdown(shutdown, &client->socket, on_shutdown);
+        }
     } else {
-        // vvvvvv
-        http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread);
-        // ^^^^^^ TODO check for error
-        uv_read_start((uv_stream_t*)&client->socket, uv_ricer_alloc, on_read);
+        if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
+            // check for further error:
+            client->shutdown = 1;
+            uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+            uv_shutdown(shutdown, &client->socket, on_shutdown);
+        } else {
+            if(client->shutdown) {
+                uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
+                uv_shutdown(shutdown, &client->socket, on_shutdown);
+            } else {    
+                uv_read_start((uv_stream_t*)&client->socket, uv_ricer_alloc, on_read);
+            }
+        }
     }
     uv_ricer_free(buff);
 }
@@ -241,6 +362,7 @@ static void on_connection(uv_stream_t* server, int status)
     client->parser_settings.on_header_field = on_http_header_field;
     client->parser_settings.on_header_value = on_http_header_value;
     client->parser_settings.on_headers_complete = on_http_headers_complete;
+    client->parser_settings.on_body = on_http_body;
     client->parser_settings.on_message_complete = on_http_message_complete;
     
     client->env = Qnil;
@@ -295,13 +417,6 @@ static VALUE Ricer_run(VALUE self, VALUE v_address, VALUE v_port, VALUE app)
     char* addr_str = rb_string_value_cstr(&v_address);
     port = (uint16_t)_port;
     struct sockaddr_in addr = uv_ip4_addr(addr_str, port);
-    /*
-    if(inet_aton(addr_str, &addr.sin_addr) == 0) {
-        // invalid address
-        rb_raise(rb_eArgError, "invalid address: %s", strerror(errno));
-    }
-    addr.sin_port = htons((uint16_t)_port);
-    addr.sin_family = AF_INET;*/
     run(addr, app);
     return Qnil;
 }
@@ -313,7 +428,10 @@ void Init_ricer()
     globals = rb_ary_new();
     rb_gc_register_address(&globals);
     
+    i_new = rb_intern("new");
     i_call = rb_intern("call");
+    i_to_i = rb_intern("to_i");
+    i_each = rb_intern("each");
     
     Ricer = rb_define_module("Ricer");
     rb_ary_push(globals, Ricer);
@@ -322,6 +440,8 @@ void Init_ricer()
     #define GLOBAL_STR(var, str) var = rb_obj_freeze(rb_str_new_cstr(str)); rb_ary_push(globals, var);
     
     GLOBAL_STR(s_empty,             "");
+    GLOBAL_STR(s_crlf,              "\r\n");
+    GLOBAL_STR(s_colon_space,       ": ");
     GLOBAL_STR(sREQUEST_METHOD,     "REQUEST_METHOD");
     GLOBAL_STR(sREQUEST_PATH,       "REQUEST_PATH");
     GLOBAL_STR(sREQUEST_URI,        "REQUEST_URI");
@@ -331,8 +451,10 @@ void Init_ricer()
     GLOBAL_STR(sSERVER_NAME,        "SERVER_NAME");
     GLOBAL_STR(sSERVER_SOFTWARE,    "SERVER_SOFTWARE");
     GLOBAL_STR(sSERVER_PORT,        "SERVER_PORT");
-    GLOBAL_STR(sRicer,              "Ricer");
+    GLOBAL_STR(sRicer,              SERVER_SOFTWARE);
     
+    GLOBAL_STR(sRackInput,          "rack.input");
+    GLOBAL_STR(sRackErrors,         "rack.errors");
     GLOBAL_STR(sRackVersion,        "rack.version");
     GLOBAL_STR(sRackMultithread,    "rack.multithread");
     GLOBAL_STR(sRackMultiprocess,   "rack.multiprocess");
@@ -342,6 +464,10 @@ void Init_ricer()
     
     RACK_VERSION = rb_obj_freeze(rb_ary_new3(2, INT2FIX(1), INT2FIX(1)));
     rb_ary_push(globals, RACK_VERSION);
+    
+    rb_require("stringio");
+    StringIO = rb_const_get(rb_cObject, rb_intern("StringIO"));
+    rb_ary_push(globals, StringIO);
     
     #undef GLOBAL_STR
 }
