@@ -10,9 +10,9 @@ A Rack-compliant ruby web server. It's written in C cuz its fast.
 
 The following Rack app was used benchmark WEBrick, Unicorn, Thin and Ricer:
 
-    ```ruby
-    run ->env { [200, { "Content-Type" => "text/html" }, ["hello world"]] }
-    ```
+```ruby
+run ->env { [200, { "Content-Type" => "text/html" }, ["hello world"]] }
+```
 
 Tests were carried out on a 32 bit Linux VM running in VirtualBox on an Intel Core 2 Quad Q6600.
 
