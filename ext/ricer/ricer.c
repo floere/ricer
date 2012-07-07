@@ -42,6 +42,7 @@ typedef struct client {
 static VALUE globals;
 
 static VALUE Ricer;
+static VALUE RicerStats;
 static ID i_new;
 static ID i_call;
 static ID i_to_i;
@@ -50,6 +51,7 @@ static ID i_close;
 static uint16_t port;
 static VALUE app = Qnil;
 static uv_loop_t* loop;
+static size_t total_requests;
 
 static VALUE StringIO;
 
@@ -218,10 +220,15 @@ static VALUE collect_headers(VALUE i, VALUE str, int argc, VALUE* argv)
         return Qnil;
     }
     
+    char* name = rb_string_value_cstr(&nv[0]);
+    if(strcmp(name, "Content-Length") == 0 || strcmp(name, "Connection") == 0) {
+        return Qnil;
+    }
+    size_t name_len = strlen(name);
     char* value = rb_string_value_cstr(&nv[1]);
     
     while(value) {
-        rb_str_concat(str, nv[0]);
+        rb_str_cat(str, name, name_len);
         rb_str_concat(str, s_colon_space);
         char* next = strchr(value, '\n');
         if(next) {
@@ -303,15 +310,18 @@ static int on_http_message_complete(http_parser* parser)
     }
     status = FIX2INT(v_status);
     
-    char buff[64];
-    sprintf(buff, "HTTP/1.1 %d OK\r\n", status);
-    VALUE v_response_str = rb_str_new(buff, strlen(buff));
-    rb_block_call(v_headers, i_each, 0, NULL, collect_headers, v_response_str);
-    rb_str_concat(v_response_str, s_crlf);
-    rb_block_call(v_body, i_each, 0, NULL, collect_body, v_response_str);
+    VALUE v_body_str = rb_str_new_cstr("");
+    rb_block_call(v_body, i_each, 0, NULL, collect_body, v_body_str);
     if(rb_respond_to(v_body, i_close)) {
         rb_funcall(v_body, i_close, 0);
     }
+    
+    char buff[256];
+    sprintf(buff, "HTTP/1.1 %d\r\nContent-Length: %ld\r\nConnection: close\r\n", status, RSTRING_LEN(v_body_str));
+    VALUE v_response_str = rb_str_new(buff, strlen(buff));
+    rb_block_call(v_headers, i_each, 0, NULL, collect_headers, v_response_str);
+    rb_str_concat(v_response_str, s_crlf);
+    rb_str_concat(v_response_str, v_body_str);
     
     uv_buf_t* b = malloc(sizeof(uv_buf_t));
     b->len = RSTRING_LEN(v_response_str);
@@ -336,6 +346,8 @@ static int on_http_message_begin(http_parser* parser)
         client->url = NULL;
         client->url_len = 0;
     }
+    
+    total_requests++;
     
     // initialize environment for new request:
     client->body = rb_str_new("", 0);
@@ -383,7 +395,7 @@ static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buff)
         if(http_parser_execute(&client->parser, &client->parser_settings, buff.base, nread) != (size_t)nread) {
             http_bad_request(client);
         } else {
-            if(client->last_callback == CB_COMPLETE) {
+            if(client->last_callback == CB_COMPLETE && !http_should_keep_alive(&client->parser)) {
                 client->shutdown = 1;
                 uv_shutdown_t* shutdown = malloc(sizeof(uv_shutdown_t));
                 uv_shutdown(shutdown, &client->socket, on_shutdown);
@@ -471,6 +483,11 @@ static VALUE Ricer_run(VALUE self, VALUE v_address, VALUE v_port, VALUE app)
     return Qnil;
 }
 
+static VALUE RicerStats_total_requests(VALUE self)
+{
+    return INT2FIX(total_requests);
+}
+
 static void on_sigint(int signal)
 {
     rb_interrupt();
@@ -493,6 +510,12 @@ void Init_ricer()
     rb_ary_push(globals, Ricer);
     rb_const_set(Ricer, rb_intern("VERSION"), rb_str_new_cstr("0.1.0"));
     rb_define_singleton_method(Ricer, "run", Ricer_run, 3);
+    
+    RicerStats = rb_define_module("Stats");
+    rb_ary_push(globals, RicerStats);
+    rb_const_set(Ricer, rb_intern("Stats"), RicerStats);
+    
+    rb_define_singleton_method(RicerStats, "total_requests", RicerStats_total_requests, 0);
     
     #define GLOBAL_STR(var, str) var = rb_obj_freeze(rb_str_new_cstr(str)); rb_ary_push(globals, var);
     

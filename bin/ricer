@@ -23,7 +23,11 @@ end.parse!
 Object.send :define_method, :run do |app|
   puts "Ricer #{Ricer::VERSION}"
   puts "Listening on #{options[:address]}:#{options[:port]}"
-  Ricer.run options[:address], options[:port], app
+  begin
+    Ricer.run options[:address], options[:port], app
+  ensure
+    puts "Served #{Ricer::Stats.total_requests} requests."
+  end
 end
 
 load options[:rackup]
