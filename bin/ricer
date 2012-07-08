@@ -7,11 +7,11 @@ options = { address: "0.0.0.0", port: 3000, rackup: "#{Dir.pwd}/config.ru" }
 OptionParser.new do |opts|
   opts.banner = "Usage: ricer [options]"
   
-  opts.on "-a", "--address IP", "Address to listen on" do |a|
+  opts.on "-a IP", "--address IP", "Address to listen on" do |a|
     options[:address] = a
   end
   
-  opts.on "-p", "--port PORT", "Port to listen on" do |a|
+  opts.on "-p PORT", "--port PORT", "Port to listen on" do |p|
     options[:port] = p.to_i
   end
   
